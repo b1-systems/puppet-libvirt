@@ -4,6 +4,7 @@
 # This file contains a provider for the resource type `libvirt_network`,
 #
 require 'tempfile'
+require 'nokogiri/diff'
 require_relative '../../../puppet_x/libvirt/rexml_sorted_attributes.rb'
 require_relative '../../../puppet_x/libvirt/sort_elements.rb'
 
@@ -26,6 +27,14 @@ Puppet::Type.type(:libvirt_network).provide(:virsh) do
   ensure
     tmpfile.close
     tmpfile.unlink
+  end
+
+  def virsh_update(new)
+    new_xml = Nokogiri::XML(new)
+    old_xml = Nokogiri::XML(self.content)
+    new_xml.diff(old_xml) do |change, node|
+      puts "#{change} to #{node}"
+    end
   end
 
   def initialize(value = {})
@@ -65,6 +74,19 @@ Puppet::Type.type(:libvirt_network).provide(:virsh) do
     should_autostart = @resource.should(:autostart)
     self.autostart = should_autostart unless autostart == should_autostart
   end
+
+  def update
+    virsh_update(resource[:content])
+
+    should_active = @resource.should(:active)
+    self.active = should_active unless active == should_active
+
+    should_autostart = @resource.should(:autostart)
+    self.autostart = should_autostart unless autostart == should_autostart
+  end
+
+
+
 
   def destroy
     begin
