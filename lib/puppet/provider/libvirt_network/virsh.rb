@@ -29,6 +29,27 @@ Puppet::Type.type(:libvirt_network).provide(:virsh) do
     tmpfile.unlink
   end
 
+  def virsh_update(new)
+    new_xml = Nokogiri::XML(new.gsub(/\s*\n\s*/, ''))
+    old_xml = Nokogiri::XML(self.content.gsub(/\s*\n\s*/, ''))
+    diff = old_xml.diff(new_xml, added: true, removed: true)
+    results = diff.select { |change, node| !live_update?(target_node(node)) }
+    if results.empty?
+      # puts "Online update possible"
+      diff.each { |change, node| online_update(target_node(node), change) }
+    else
+      # puts "We need to update the network offline"
+      if @property_hash[:uuid]
+        new_xml.root.add_child("<uuid>#{@property_hash[:uuid]}</uuid>")
+      end
+      self.destroy
+      #virsh_define(new_xml.to_s)
+      self.create
+      restart_libvirt_service
+    end
+  end
+
+
   def net_update_section(node)
     node.path.gsub(/^\/network\//, '').gsub('/', '-')
   end
@@ -78,26 +99,6 @@ Puppet::Type.type(:libvirt_network).provide(:virsh) do
     end
   end
 
-  def virsh_update(new)
-    new_xml = Nokogiri::XML(new.gsub(/\s*\n\s*/, ''))
-    old_xml = Nokogiri::XML(self.content.gsub(/\s*\n\s*/, ''))
-    diff = old_xml.diff(new_xml, added: true, removed: true)
-    results = diff.select { |change, node| !live_update?(target_node(node)) }
-    if results.empty?
-      # puts "Online update possible"
-      diff.each { |change, node| online_update(target_node(node), change) }
-    else
-      # puts "We need to update the network offline"
-      if @property_hash[:uuid]
-        new_xml.root.add_child("<uuid>#{@property_hash[:uuid]}</uuid>")
-      end
-      self.destroy
-      #virsh_define(new_xml.to_s)
-      self.create
-      restart_libvirt_service
-    end
-  end
-
   def initialize(value = {})
     super(value)
     @property_flush = {}
@@ -125,15 +126,19 @@ Puppet::Type.type(:libvirt_network).provide(:virsh) do
     end
   end
 
-  def create
-    virsh_define(resource[:content])
-    @property_hash[:ensure] = :present
-
+  def self.run_control
     should_active = @resource.should(:active)
     self.active = should_active unless active == should_active
 
     should_autostart = @resource.should(:autostart)
     self.autostart = should_autostart unless autostart == should_autostart
+  end
+
+  def create
+    virsh_define(resource[:content])
+    @property_hash[:ensure] = :present
+
+    self.run_control
   end
 
   def destroy
@@ -210,5 +215,7 @@ Puppet::Type.type(:libvirt_network).provide(:virsh) do
     content = @property_flush[:content] || @resource[:content]
     virsh_update(content)
     @property_flush.clear
+
+    self.run_control
   end
 end
