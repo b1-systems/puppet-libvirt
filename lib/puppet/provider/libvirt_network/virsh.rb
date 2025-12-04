@@ -46,7 +46,7 @@ Puppet::Type.type(:libvirt_network).provide(:virsh) do
     section_name = net_update_section(target)
     if inplace_update?(target)
       if change_type == '-'
-        puts "Skipping removal of section_name due to updatability."
+        # puts "Skipping removal of section_name due to updatability."
       else
         virsh(base_command + ['modify', section_name])
       end
@@ -56,14 +56,6 @@ Puppet::Type.type(:libvirt_network).provide(:virsh) do
       else
         virsh(base_command + ['add', section_name])
       end
-    end
-  end
-
-  def modify_node(target, change_type)
-    if live_update?(target)
-      online_update(target, change_type)
-    else
-      puts "Offline update required for #{target}"
     end
   end
 
@@ -92,10 +84,10 @@ Puppet::Type.type(:libvirt_network).provide(:virsh) do
     diff = old_xml.diff(new_xml, added: true, removed: true)
     results = diff.select { |change, node| !live_update?(target_node(node)) }
     if results.empty?
-      puts "Online update possible"
-      diff.each { |change, node| modify_node(target_node(node), change) }
+      # puts "Online update possible"
+      diff.each { |change, node| online_update(target_node(node), change) }
     else
-      puts "We need to update the network offline"
+      # puts "We need to update the network offline"
       if @property_hash[:uuid]
         new_xml.root.add_child("<uuid>#{@property_hash[:uuid]}</uuid>")
       end
@@ -104,12 +96,6 @@ Puppet::Type.type(:libvirt_network).provide(:virsh) do
       self.create
       restart_libvirt_service
     end
-    #diff.each do |change, node|
-      #when Nokogiri::XML::Node::ATTRIBUTE_NODE
-      #  modify_node(node.parent, change_type)
-      #when Nokogiri::XML::Node::ELEMENT_NODE
-      #  modify_node(node, change_type)
-    #end
   end
 
   def initialize(value = {})
