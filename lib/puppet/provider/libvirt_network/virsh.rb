@@ -29,12 +29,87 @@ Puppet::Type.type(:libvirt_network).provide(:virsh) do
     tmpfile.unlink
   end
 
-  def virsh_update(new)
-    new_xml = Nokogiri::XML(new)
-    old_xml = Nokogiri::XML(self.content)
-    new_xml.diff(old_xml) do |change, node|
-      puts "#{change} to #{node}"
+  def net_update_section(node)
+    node.path.gsub(/^\/network\//, '').gsub('/', '-')
+  end
+
+  def inplace_update?(node)
+    %w[ip-dhcp-host portgroup dns-host dns-txt dns-srv].include?(net_update_section(node))
+  end
+
+  def live_update?(node)
+    %w[ip-dhcp-host ip-dhcp-range forward-interface portgroup dns-host dns-txt dns-srv].include?(net_update_section(node))
+  end
+
+  def online_update(target, change_type)
+    base_command = ['net-update', @resource[:name], '--xml', target]
+    section_name = net_update_section(target)
+    if inplace_update?(target)
+      if change_type == '-'
+        puts "Skipping removal of section_name due to updatability."
+      else
+        virsh(base_command + ['modify', section_name])
+      end
+    else
+      if change_type == '-'
+        virsh(base_command + ['delete', section_name])
+      else
+        virsh(base_command + ['add', section_name])
+      end
     end
+  end
+
+  def modify_node(target, change_type)
+    if live_update?(target)
+      online_update(target, change_type)
+    else
+      puts "Offline update required for #{target}"
+    end
+  end
+
+  def target_node(node)
+    case node.type
+    when Nokogiri::XML::Node::ATTRIBUTE_NODE
+      node.parent
+    when Nokogiri::XML::Node::ELEMENT_NODE
+      node
+    else
+      raise Puppet::Error, "Couldn't parse #{node.inspect}"
+    end
+  end
+
+  def restart_libvirt_service()
+    require 'open3'
+    stdout, stderr, status = Open3.capture3('systemctl', 'restart', 'libvirtd.service')
+    unless status.success?
+      raise Puppet::Error, "Failed to restart libvirt service: #{stdout}, #{stderr}"
+    end
+  end
+
+  def virsh_update(new)
+    new_xml = Nokogiri::XML(new.gsub(/\s*\n\s*/, ''))
+    old_xml = Nokogiri::XML(self.content.gsub(/\s*\n\s*/, ''))
+    diff = old_xml.diff(new_xml, added: true, removed: true)
+    results = diff.select { |change, node| !live_update?(target_node(node)) }
+    if results.empty?
+      puts "Online update possible"
+      diff.each { |change, node| modify_node(target_node(node), change) }
+    else
+      puts "We need to update the network offline"
+      if @property_hash[:uuid]
+        new_xml.root.add_child("<uuid>#{@property_hash[:uuid]}</uuid>")
+      end
+      self.destroy
+      #virsh_define(new_xml.to_s)
+      self.create
+      restart_libvirt_service
+    end
+    #diff.each do |change, node|
+      #when Nokogiri::XML::Node::ATTRIBUTE_NODE
+      #  modify_node(node.parent, change_type)
+      #when Nokogiri::XML::Node::ELEMENT_NODE
+      #  modify_node(node, change_type)
+    #end
   end
 
   def initialize(value = {})
@@ -74,19 +149,6 @@ Puppet::Type.type(:libvirt_network).provide(:virsh) do
     should_autostart = @resource.should(:autostart)
     self.autostart = should_autostart unless autostart == should_autostart
   end
-
-  def update
-    virsh_update(resource[:content])
-
-    should_active = @resource.should(:active)
-    self.active = should_active unless active == should_active
-
-    should_autostart = @resource.should(:autostart)
-    self.autostart = should_autostart unless autostart == should_autostart
-  end
-
-
-
 
   def destroy
     begin
@@ -160,7 +222,7 @@ Puppet::Type.type(:libvirt_network).provide(:virsh) do
   def flush
     return if @property_flush.empty?
     content = @property_flush[:content] || @resource[:content]
-    virsh_define(content)
+    virsh_update(content)
     @property_flush.clear
   end
 end
