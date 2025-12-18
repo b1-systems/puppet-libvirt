@@ -126,7 +126,7 @@ Puppet::Type.type(:libvirt_network).provide(:virsh) do
     end
   end
 
-  def self.run_control
+  def run_control
     should_active = @resource.should(:active)
     self.active = should_active unless active == should_active
 
