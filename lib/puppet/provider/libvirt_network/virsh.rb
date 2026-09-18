@@ -36,7 +36,7 @@ Puppet::Type.type(:libvirt_network).provide(:virsh) do
     results = diff.select { |change, node| !live_update?(target_node(node)) }
     if results.empty?
       # puts "Online update possible"
-      diff.each { |change, node| online_update(target_node(node), change) }
+      diff.each { |change, node| online_update(node, change) }
     else
       # puts "We need to update the network offline"
       if @property_hash[:uuid]
@@ -51,7 +51,7 @@ Puppet::Type.type(:libvirt_network).provide(:virsh) do
 
 
   def net_update_section(node)
-    node.path.gsub(/^\/network\//, '').gsub('/', '-')
+    node.path.gsub(/\[\d+\]/, '').gsub(/^\/network\//, '').gsub('/', '-')
   end
 
   def inplace_update?(node)
@@ -62,21 +62,24 @@ Puppet::Type.type(:libvirt_network).provide(:virsh) do
     %w[ip-dhcp-host ip-dhcp-range forward-interface portgroup dns-host dns-txt dns-srv].include?(net_update_section(node))
   end
 
-  def online_update(target, change_type)
+  def online_update(node, change_type)
+    target = target_node(node)
     base_command = ['net-update', @resource[:name], '--xml', target]
     section_name = net_update_section(target)
     if inplace_update?(target)
-      if change_type == '-'
-        # puts "Skipping removal of section_name due to updatability."
-      else
+      if node.type == Nokogiri::XML::Node::ELEMENT_NODE
+        # A whole entry (e.g. a <host>) was added or removed, so it must be
+        # added/deleted. A `modify` would fail because the entry does not
+        # exist yet (on add) or is being removed.
+        virsh(base_command + [change_type == '-' ? 'delete' : 'add', section_name])
+      elsif change_type != '-'
+        # An attribute of an existing entry changed; `modify` with the full
+        # (new) entry XML updates it in place. The `-` (old) side is skipped
+        # because the `+`/`modify` already sets the new state.
         virsh(base_command + ['modify', section_name])
       end
     else
-      if change_type == '-'
-        virsh(base_command + ['delete', section_name])
-      else
-        virsh(base_command + ['add', section_name])
-      end
+      virsh(base_command + [change_type == '-' ? 'delete' : 'add', section_name])
     end
   end
 
@@ -149,6 +152,9 @@ Puppet::Type.type(:libvirt_network).provide(:virsh) do
     end
     virsh('--quiet', 'net-undefine', @resource[:name])
     @property_hash[:ensure] = :absent
+    # Reset stale state; run_control in create re-applies active/autostart.
+    @property_hash[:active] = :false
+    @property_hash[:autostart] = :false
   end
 
   def content=(_content)
@@ -185,10 +191,10 @@ Puppet::Type.type(:libvirt_network).provide(:virsh) do
   def active=(active)
     if active == :true
       virsh('--quiet', 'net-start', '--network', @resource[:name])
-      @property_hash[:active] = 'true'
+      @property_hash[:active] = :true
     else
       virsh('--quiet', 'net-destroy', '--network', @resource[:name])
-      @property_hash[:active] = 'false'
+      @property_hash[:active] = :false
     end
   end
 
