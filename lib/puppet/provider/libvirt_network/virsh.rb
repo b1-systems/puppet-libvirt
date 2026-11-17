@@ -107,7 +107,8 @@ Puppet::Type.type(:libvirt_network).provide(:virsh) do
   end
 
   def online_update_entry(old_entry, new_entry, section)
-    if %w[ip-dhcp-range dns-host dns-txt dns-srv].include?(section)
+    if %w[ip-dhcp-range dns-host dns-txt dns-srv].include?(section) ||
+       (section == 'portgroup' && old_entry['name'] != new_entry['name'])
       online_update_xml(old_entry, 'delete', section)
       online_update_xml(new_entry, 'add', section)
     else
