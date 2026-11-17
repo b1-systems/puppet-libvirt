@@ -36,22 +36,60 @@ Puppet::Type.type(:libvirt_network).provide(:virsh) do
     results = diff.select { |change, node| !live_update?(target_node(node)) }
     if results.empty?
       # puts "Online update possible"
-      diff.each { |change, node| online_update(target_node(node), change) }
+      update_entries = {}
+      diff.each do |_change, node|
+        next unless node.type == Nokogiri::XML::Node::ATTRIBUTE_NODE
+
+        target = target_node(node)
+        section = net_update_section(target)
+        entry = update_entry_node(target, section)
+        next unless entry
+
+        old_entry = old_xml.at_xpath(entry.path)
+        new_entry = new_xml.at_xpath(entry.path)
+        next unless old_entry && new_entry
+
+        update_entries[[section, old_entry.path]] = [old_entry, new_entry]
+      end
+      diff.each do |change, node|
+        target = target_node(node)
+        entry = update_entry_node(target, net_update_section(target)) if node.type == Nokogiri::XML::Node::ATTRIBUTE_NODE
+        old_entry = old_xml.at_xpath(entry.path) if entry
+        next if old_entry && update_entries.key?([net_update_section(target), old_entry.path])
+
+        online_update(node, change)
+      end
+      dhcp_host_updates = update_entries.select do |(section, _path), (old_entry, new_entry)|
+        section == 'ip-dhcp-host' && old_entry['mac'] != new_entry['mac']
+      end
+      dhcp_host_updates.each_value do |old_entry, _new_entry|
+        online_update_xml(old_entry, 'delete', 'ip-dhcp-host')
+      end
+      dhcp_host_updates.each_value do |_old_entry, new_entry|
+        online_update_xml(new_entry, 'add', 'ip-dhcp-host')
+      end
+      dns_txt_updates = update_entries.select { |(section, _path), _entries| section == 'dns-txt' }
+      dns_txt_updates.each_value do |old_entry, _new_entry|
+        online_update_xml(old_entry, 'delete', 'dns-txt')
+      end
+      dns_txt_updates.each_value do |_old_entry, new_entry|
+        online_update_xml(new_entry, 'add', 'dns-txt')
+      end
+      update_entries.each do |(section, _path), (old_entry, new_entry)|
+        next if section == 'dns-txt' || dhcp_host_updates.key?([section, _path])
+
+        online_update_entry(old_entry, new_entry, section)
+      end
     else
       # puts "We need to update the network offline"
-      if @property_hash[:uuid]
-        new_xml.root.add_child("<uuid>#{@property_hash[:uuid]}</uuid>")
-      end
       self.destroy
-      #virsh_define(new_xml.to_s)
       self.create
-      restart_libvirt_service
     end
   end
 
 
   def net_update_section(node)
-    node.path.gsub(/^\/network\//, '').gsub('/', '-')
+    node.path.gsub(/\[\d+\]/, '').gsub(/^\/network\//, '').gsub('/', '-')
   end
 
   def inplace_update?(node)
@@ -62,21 +100,70 @@ Puppet::Type.type(:libvirt_network).provide(:virsh) do
     %w[ip-dhcp-host ip-dhcp-range forward-interface portgroup dns-host dns-txt dns-srv].include?(net_update_section(node))
   end
 
-  def online_update(target, change_type)
-    base_command = ['net-update', @resource[:name], '--xml', target]
+  def update_entry_node(node, section)
+    entry_name, parent_name = {
+      'ip-dhcp-host' => %w[host dhcp],
+      'ip-dhcp-range' => %w[range dhcp],
+      'portgroup' => %w[portgroup network],
+      'dns-host' => %w[host dns],
+      'dns-txt' => %w[txt dns],
+      'dns-srv' => %w[srv dns],
+    }[section]
+    return unless entry_name
+
+    while node && node.type == Nokogiri::XML::Node::ELEMENT_NODE
+      return node if node.name == entry_name && node.parent&.name == parent_name
+
+      node = node.parent
+    end
+    nil
+  end
+
+  def online_update_entry(old_entry, new_entry, section)
+    if (section == 'ip-dhcp-host' && old_entry['mac'] != new_entry['mac']) ||
+       %w[ip-dhcp-range dns-host dns-txt dns-srv].include?(section) ||
+       (section == 'portgroup' && old_entry['name'] != new_entry['name'])
+      online_update_xml(old_entry, 'delete', section)
+      online_update_xml(new_entry, 'add', section)
+    else
+      online_update_xml(new_entry, 'modify', section)
+    end
+  end
+
+  def online_update_xml(node, change_type, section)
+    target = target_node(node)
+    base_command = ['net-update', @resource[:name], '--xml', target.to_xml, change_type, section]
+    virsh(base_command + net_update_options(target, section))
+  end
+
+  def net_update_options(target, section)
+    options = []
+    if section.start_with?('ip-dhcp-')
+      ip_node = target.ancestors.find { |ancestor| ancestor.name == 'ip' && ancestor.parent&.name == 'network' }
+      options += ['--parent-index', ip_node.xpath('preceding-sibling::ip').length.to_s] if ip_node
+    end
+    options << '--config'
+    options << '--live' if active == :true
+    options
+  end
+
+  def online_update(node, change_type)
+    target = target_node(node)
     section_name = net_update_section(target)
     if inplace_update?(target)
-      if change_type == '-'
-        # puts "Skipping removal of section_name due to updatability."
-      else
-        virsh(base_command + ['modify', section_name])
+      if node.type == Nokogiri::XML::Node::ELEMENT_NODE
+        # A whole entry (e.g. a <host>) was added or removed, so it must be
+        # added/deleted. A `modify` would fail because the entry does not
+        # exist yet (on add) or is being removed.
+        online_update_xml(target, change_type == '-' ? 'delete' : 'add', section_name)
+      elsif change_type != '-'
+        # An attribute of an existing entry changed; `modify` with the full
+        # (new) entry XML updates it in place. The `-` (old) side is skipped
+        # because the `+`/`modify` already sets the new state.
+        online_update_xml(target, 'modify', section_name)
       end
     else
-      if change_type == '-'
-        virsh(base_command + ['delete', section_name])
-      else
-        virsh(base_command + ['add', section_name])
-      end
+      online_update_xml(target, change_type == '-' ? 'delete' : 'add', section_name)
     end
   end
 
@@ -88,14 +175,6 @@ Puppet::Type.type(:libvirt_network).provide(:virsh) do
       node
     else
       raise Puppet::Error, "Couldn't parse #{node.inspect}"
-    end
-  end
-
-  def restart_libvirt_service()
-    require 'open3'
-    stdout, stderr, status = Open3.capture3('systemctl', 'restart', 'libvirtd.service')
-    unless status.success?
-      raise Puppet::Error, "Failed to restart libvirt service: #{stdout}, #{stderr}"
     end
   end
 
@@ -142,13 +221,15 @@ Puppet::Type.type(:libvirt_network).provide(:virsh) do
   end
 
   def destroy
-    begin
+    if active == :true
       virsh('--quiet', 'net-destroy', @resource[:name])
-    rescue
-      # do nothing
+      @property_hash[:active] = :false
     end
     virsh('--quiet', 'net-undefine', @resource[:name])
     @property_hash[:ensure] = :absent
+    # Reset stale state; run_control in create re-applies active/autostart.
+    @property_hash[:active] = :false
+    @property_hash[:autostart] = :false
   end
 
   def content=(_content)
@@ -185,10 +266,10 @@ Puppet::Type.type(:libvirt_network).provide(:virsh) do
   def active=(active)
     if active == :true
       virsh('--quiet', 'net-start', '--network', @resource[:name])
-      @property_hash[:active] = 'true'
+      @property_hash[:active] = :true
     else
       virsh('--quiet', 'net-destroy', '--network', @resource[:name])
-      @property_hash[:active] = 'false'
+      @property_hash[:active] = :false
     end
   end
 
