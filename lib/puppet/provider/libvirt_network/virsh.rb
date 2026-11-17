@@ -36,7 +36,31 @@ Puppet::Type.type(:libvirt_network).provide(:virsh) do
     results = diff.select { |change, node| !live_update?(target_node(node)) }
     if results.empty?
       # puts "Online update possible"
-      diff.each { |change, node| online_update(node, change) }
+      update_entries = {}
+      diff.each do |_change, node|
+        next unless node.type == Nokogiri::XML::Node::ATTRIBUTE_NODE
+
+        target = target_node(node)
+        section = net_update_section(target)
+        entry = update_entry_node(target, section)
+        next unless entry
+
+        old_entry = old_xml.at_xpath(entry.path)
+        new_entry = new_xml.at_xpath(entry.path)
+        next unless old_entry && new_entry
+
+        update_entries[[section, entry.path]] = [old_entry, new_entry]
+      end
+      diff.each do |change, node|
+        target = target_node(node)
+        entry = update_entry_node(target, net_update_section(target)) if node.type == Nokogiri::XML::Node::ATTRIBUTE_NODE
+        next if entry && update_entries.key?([net_update_section(target), entry.path])
+
+        online_update(node, change)
+      end
+      update_entries.each do |(section, _path), (old_entry, new_entry)|
+        online_update_entry(old_entry, new_entry, section)
+      end
     else
       # puts "We need to update the network offline"
       if @property_hash[:uuid]
@@ -62,24 +86,68 @@ Puppet::Type.type(:libvirt_network).provide(:virsh) do
     %w[ip-dhcp-host ip-dhcp-range forward-interface portgroup dns-host dns-txt dns-srv].include?(net_update_section(node))
   end
 
+  def update_entry_node(node, section)
+    entry_name, parent_name = {
+      'ip-dhcp-host' => %w[host dhcp],
+      'ip-dhcp-range' => %w[range dhcp],
+      'portgroup' => %w[portgroup network],
+      'dns-host' => %w[host dns],
+      'dns-txt' => %w[txt dns],
+      'dns-srv' => %w[srv dns],
+    }[section]
+    return unless entry_name
+
+    while node && node.type == Nokogiri::XML::Node::ELEMENT_NODE
+      return node if node.name == entry_name && node.parent&.name == parent_name
+
+      node = node.parent
+    end
+    nil
+  end
+
+  def online_update_entry(old_entry, new_entry, section)
+    if %w[ip-dhcp-range dns-host dns-txt dns-srv].include?(section)
+      online_update_xml(old_entry, 'delete', section)
+      online_update_xml(new_entry, 'add', section)
+    else
+      online_update_xml(new_entry, 'modify', section)
+    end
+  end
+
+  def online_update_xml(node, change_type, section)
+    target = target_node(node)
+    base_command = ['net-update', @resource[:name], '--xml', target.to_xml, change_type, section]
+    virsh(base_command + net_update_options(target, section))
+  end
+
+  def net_update_options(target, section)
+    options = []
+    if section.start_with?('ip-dhcp-')
+      ip_node = target.ancestors.find { |ancestor| ancestor.name == 'ip' && ancestor.parent&.name == 'network' }
+      options += ['--parent-index', ip_node.xpath('preceding-sibling::ip').length.to_s] if ip_node
+    end
+    options << '--config'
+    options << '--live' if active == :true
+    options
+  end
+
   def online_update(node, change_type)
     target = target_node(node)
-    base_command = ['net-update', @resource[:name], '--xml', target]
     section_name = net_update_section(target)
     if inplace_update?(target)
       if node.type == Nokogiri::XML::Node::ELEMENT_NODE
         # A whole entry (e.g. a <host>) was added or removed, so it must be
         # added/deleted. A `modify` would fail because the entry does not
         # exist yet (on add) or is being removed.
-        virsh(base_command + [change_type == '-' ? 'delete' : 'add', section_name])
+        online_update_xml(target, change_type == '-' ? 'delete' : 'add', section_name)
       elsif change_type != '-'
         # An attribute of an existing entry changed; `modify` with the full
         # (new) entry XML updates it in place. The `-` (old) side is skipped
         # because the `+`/`modify` already sets the new state.
-        virsh(base_command + ['modify', section_name])
+        online_update_xml(target, 'modify', section_name)
       end
     else
-      virsh(base_command + [change_type == '-' ? 'delete' : 'add', section_name])
+      online_update_xml(target, change_type == '-' ? 'delete' : 'add', section_name)
     end
   end
 
