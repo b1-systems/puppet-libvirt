@@ -39,13 +39,8 @@ Puppet::Type.type(:libvirt_network).provide(:virsh) do
       diff.each { |change, node| online_update(target_node(node), change) }
     else
       # puts "We need to update the network offline"
-      if @property_hash[:uuid]
-        new_xml.root.add_child("<uuid>#{@property_hash[:uuid]}</uuid>")
-      end
       self.destroy
-      #virsh_define(new_xml.to_s)
       self.create
-      restart_libvirt_service
     end
   end
 
@@ -88,14 +83,6 @@ Puppet::Type.type(:libvirt_network).provide(:virsh) do
       node
     else
       raise Puppet::Error, "Couldn't parse #{node.inspect}"
-    end
-  end
-
-  def restart_libvirt_service()
-    require 'open3'
-    stdout, stderr, status = Open3.capture3('systemctl', 'restart', 'libvirtd.service')
-    unless status.success?
-      raise Puppet::Error, "Failed to restart libvirt service: #{stdout}, #{stderr}"
     end
   end
 
@@ -142,13 +129,13 @@ Puppet::Type.type(:libvirt_network).provide(:virsh) do
   end
 
   def destroy
-    begin
+    if active == :true
       virsh('--quiet', 'net-destroy', @resource[:name])
-    rescue
-      # do nothing
+      @property_hash[:active] = :false
     end
     virsh('--quiet', 'net-undefine', @resource[:name])
     @property_hash[:ensure] = :absent
+    @property_hash[:autostart] = :false
   end
 
   def content=(_content)
@@ -185,10 +172,10 @@ Puppet::Type.type(:libvirt_network).provide(:virsh) do
   def active=(active)
     if active == :true
       virsh('--quiet', 'net-start', '--network', @resource[:name])
-      @property_hash[:active] = 'true'
+      @property_hash[:active] = :true
     else
       virsh('--quiet', 'net-destroy', '--network', @resource[:name])
-      @property_hash[:active] = 'false'
+      @property_hash[:active] = :false
     end
   end
 
