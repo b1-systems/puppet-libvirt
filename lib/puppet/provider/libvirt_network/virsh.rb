@@ -59,6 +59,15 @@ Puppet::Type.type(:libvirt_network).provide(:virsh) do
 
         online_update(node, change)
       end
+      dhcp_host_updates = update_entries.select do |(section, _path), (old_entry, new_entry)|
+        section == 'ip-dhcp-host' && old_entry['mac'] != new_entry['mac']
+      end
+      dhcp_host_updates.each_value do |old_entry, _new_entry|
+        online_update_xml(old_entry, 'delete', 'ip-dhcp-host')
+      end
+      dhcp_host_updates.each_value do |_old_entry, new_entry|
+        online_update_xml(new_entry, 'add', 'ip-dhcp-host')
+      end
       dns_txt_updates = update_entries.select { |(section, _path), _entries| section == 'dns-txt' }
       dns_txt_updates.each_value do |old_entry, _new_entry|
         online_update_xml(old_entry, 'delete', 'dns-txt')
@@ -67,19 +76,14 @@ Puppet::Type.type(:libvirt_network).provide(:virsh) do
         online_update_xml(new_entry, 'add', 'dns-txt')
       end
       update_entries.each do |(section, _path), (old_entry, new_entry)|
-        next if section == 'dns-txt'
+        next if section == 'dns-txt' || dhcp_host_updates.key?([section, _path])
 
         online_update_entry(old_entry, new_entry, section)
       end
     else
       # puts "We need to update the network offline"
-      if @property_hash[:uuid]
-        new_xml.root.add_child("<uuid>#{@property_hash[:uuid]}</uuid>")
-      end
       self.destroy
-      #virsh_define(new_xml.to_s)
       self.create
-      restart_libvirt_service
     end
   end
 
@@ -174,14 +178,6 @@ Puppet::Type.type(:libvirt_network).provide(:virsh) do
     end
   end
 
-  def restart_libvirt_service()
-    require 'open3'
-    stdout, stderr, status = Open3.capture3('systemctl', 'restart', 'libvirtd.service')
-    unless status.success?
-      raise Puppet::Error, "Failed to restart libvirt service: #{stdout}, #{stderr}"
-    end
-  end
-
   def initialize(value = {})
     super(value)
     @property_flush = {}
@@ -225,10 +221,9 @@ Puppet::Type.type(:libvirt_network).provide(:virsh) do
   end
 
   def destroy
-    begin
+    if active == :true
       virsh('--quiet', 'net-destroy', @resource[:name])
-    rescue
-      # do nothing
+      @property_hash[:active] = :false
     end
     virsh('--quiet', 'net-undefine', @resource[:name])
     @property_hash[:ensure] = :absent

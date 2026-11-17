@@ -80,6 +80,23 @@ RSpec.describe Puppet::Type.type(:libvirt_network).provider(:virsh) do
     expect(commands.all? { |command| command[5] == 'ip-dhcp-host' }).to be(true)
   end
 
+  it 'deletes all DHCP hosts before adding replacements when MACs are exchanged' do
+    old_xml = '<network><ip><dhcp><host mac="aa" ip="192.0.2.2"/><host mac="bb" ip="192.0.2.3"/></dhcp></ip></network>'
+    new_xml = '<network><ip><dhcp><host mac="bb" ip="192.0.2.2"/><host mac="aa" ip="192.0.2.3"/></dhcp></ip></network>'
+
+    update_network(provider, old_xml, new_xml)
+
+    expect(commands.length).to eq(4)
+    expect(commands.map { |command| command[4] }).to eq(%w[delete delete add add])
+    expect(commands.map { |command| command[3] }).to eq([
+      '<host mac="aa" ip="192.0.2.2"/>',
+      '<host mac="bb" ip="192.0.2.3"/>',
+      '<host mac="bb" ip="192.0.2.2"/>',
+      '<host mac="aa" ip="192.0.2.3"/>',
+    ])
+    expect(commands.all? { |command| command[5] == 'ip-dhcp-host' }).to be(true)
+  end
+
   it 'coalesces DHCP range attribute changes into one replacement' do
     old_xml = '<network><ip><dhcp><range start="192.0.2.10" end="192.0.2.20"/></dhcp></ip></network>'
     new_xml = '<network><ip><dhcp><range start="192.0.2.30" end="192.0.2.40"/></dhcp></ip></network>'
@@ -99,5 +116,93 @@ RSpec.describe Puppet::Type.type(:libvirt_network).provider(:virsh) do
 
     expect(commands.first).to include('--config')
     expect(commands.first).not_to include('--live')
+  end
+end
+
+RSpec.describe Puppet::Type.type(:libvirt_network).provider(:virsh), 'offline updates' do
+  let(:old_content) { '<network><name>test</name><bridge name="old"/></network>' }
+  let(:new_content) { '<network><name>test</name><bridge name="new"/></network>' }
+  let(:resource) do
+    Puppet::Type.type(:libvirt_network).new(
+      name: 'test',
+      content: new_content,
+      active: desired_active,
+      autostart: desired_autostart,
+    )
+  end
+  let(:desired_active) { :true }
+  let(:desired_autostart) { :true }
+  let(:initial_active) { :true }
+  let(:initial_autostart) { :true }
+  let(:provider) do
+    described_class.new(
+      name: 'test',
+      ensure: :present,
+      active: initial_active,
+      autostart: initial_autostart,
+      uuid: '12345678-1234-1234-1234-123456789abc',
+    ).tap { |instance| instance.resource = resource }
+  end
+
+  before do
+    allow(provider).to receive(:virsh).with('--quiet', '--readonly', 'net-dumpxml', 'test').and_return(old_content)
+    provider.content = new_content
+  end
+
+  def expect_definition
+    expect(provider).to receive(:virsh).with('--quiet', 'net-define', kind_of(String)).ordered do |_, _, path|
+      xml = REXML::Document.new(File.read(path))
+      expect(xml.elements['network/bridge'].attributes['name']).to eq('new')
+      expect(xml.elements['network/uuid'].text).to eq('12345678-1234-1234-1234-123456789abc')
+    end
+  end
+
+  it 'restarts the recreated network and restores autostart' do
+    expect(provider).to receive(:virsh).with('--quiet', 'net-destroy', 'test').ordered
+    expect(provider).to receive(:virsh).with('--quiet', 'net-undefine', 'test').ordered
+    expect_definition
+    expect(provider).to receive(:virsh).with('--quiet', 'net-start', '--network', 'test').ordered
+    expect(provider).to receive(:virsh).with('--quiet', 'net-autostart', '--network', 'test').ordered
+
+    provider.flush
+    expect(provider.active).to eq(:true)
+    expect(provider.autostart).to eq(:true)
+  end
+
+  context 'when the network is inactive and should stay inactive' do
+    let(:initial_active) { :false }
+    let(:desired_active) { :false }
+
+    it 'redefines without starting it and restores autostart' do
+      expect(provider).to receive(:virsh).with('--quiet', 'net-undefine', 'test').ordered
+      expect_definition
+      expect(provider).to receive(:virsh).with('--quiet', 'net-autostart', '--network', 'test').ordered
+
+      provider.flush
+      expect(provider.active).to eq(:false)
+    end
+  end
+
+  context 'when autostart is disabled' do
+    let(:initial_autostart) { :false }
+    let(:desired_autostart) { :false }
+
+    it 'starts the network without enabling autostart' do
+      expect(provider).to receive(:virsh).with('--quiet', 'net-destroy', 'test').ordered
+      expect(provider).to receive(:virsh).with('--quiet', 'net-undefine', 'test').ordered
+      expect_definition
+      expect(provider).to receive(:virsh).with('--quiet', 'net-start', '--network', 'test').ordered
+
+      provider.flush
+      expect(provider.autostart).to eq(:false)
+    end
+  end
+
+  it 'propagates a failure to stop the network without undefining it' do
+    expect(provider).to receive(:virsh).with('--quiet', 'net-destroy', 'test')
+      .and_raise(Puppet::ExecutionFailure, 'stop failed')
+    expect(provider).not_to receive(:virsh).with('--quiet', 'net-undefine', 'test')
+
+    expect { provider.flush }.to raise_error(Puppet::ExecutionFailure, 'stop failed')
   end
 end
