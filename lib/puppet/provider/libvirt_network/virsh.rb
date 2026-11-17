@@ -49,12 +49,13 @@ Puppet::Type.type(:libvirt_network).provide(:virsh) do
         new_entry = new_xml.at_xpath(entry.path)
         next unless old_entry && new_entry
 
-        update_entries[[section, entry.path]] = [old_entry, new_entry]
+        update_entries[[section, old_entry.path]] = [old_entry, new_entry]
       end
       diff.each do |change, node|
         target = target_node(node)
         entry = update_entry_node(target, net_update_section(target)) if node.type == Nokogiri::XML::Node::ATTRIBUTE_NODE
-        next if entry && update_entries.key?([net_update_section(target), entry.path])
+        old_entry = old_xml.at_xpath(entry.path) if entry
+        next if old_entry && update_entries.key?([net_update_section(target), old_entry.path])
 
         online_update(node, change)
       end
