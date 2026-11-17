@@ -54,6 +54,32 @@ RSpec.describe Puppet::Type.type(:libvirt_network).provider(:virsh) do
     expect(commands.all? { |command| command[5] == 'dns-host' }).to be(true)
   end
 
+  it 'deletes all DNS TXT records before adding replacements' do
+    old_xml = '<network><dns><txt name="first"><txt value="one"/></txt><txt name="second"><txt value="two"/></txt></dns></network>'
+    new_xml = '<network><dns><txt name="second"><txt value="one"/></txt><txt name="first"><txt value="two"/></txt></dns></network>'
+
+    update_network(provider, old_xml, new_xml)
+
+    expect(commands.length).to eq(4)
+    expect(commands.map { |command| command[4] }).to eq(%w[delete delete add add])
+    expect(commands.all? { |command| command[5] == 'dns-txt' }).to be(true)
+  end
+
+  it 'replaces a DHCP host when its MAC and IP both change' do
+    old_xml = '<network><ip><dhcp><host mac="aa" ip="192.0.2.2"/></dhcp></ip></network>'
+    new_xml = '<network><ip><dhcp><host mac="bb" ip="192.0.2.3"/></dhcp></ip></network>'
+
+    update_network(provider, old_xml, new_xml)
+
+    expect(commands.length).to eq(2)
+    expect(commands.map { |command| command[4] }).to eq(%w[delete add])
+    expect(commands.map { |command| command[3] }).to eq([
+      '<host mac="aa" ip="192.0.2.2"/>',
+      '<host mac="bb" ip="192.0.2.3"/>',
+    ])
+    expect(commands.all? { |command| command[5] == 'ip-dhcp-host' }).to be(true)
+  end
+
   it 'coalesces DHCP range attribute changes into one replacement' do
     old_xml = '<network><ip><dhcp><range start="192.0.2.10" end="192.0.2.20"/></dhcp></ip></network>'
     new_xml = '<network><ip><dhcp><range start="192.0.2.30" end="192.0.2.40"/></dhcp></ip></network>'

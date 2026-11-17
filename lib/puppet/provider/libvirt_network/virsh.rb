@@ -59,7 +59,16 @@ Puppet::Type.type(:libvirt_network).provide(:virsh) do
 
         online_update(node, change)
       end
+      dns_txt_updates = update_entries.select { |(section, _path), _entries| section == 'dns-txt' }
+      dns_txt_updates.each_value do |old_entry, _new_entry|
+        online_update_xml(old_entry, 'delete', 'dns-txt')
+      end
+      dns_txt_updates.each_value do |_old_entry, new_entry|
+        online_update_xml(new_entry, 'add', 'dns-txt')
+      end
       update_entries.each do |(section, _path), (old_entry, new_entry)|
+        next if section == 'dns-txt'
+
         online_update_entry(old_entry, new_entry, section)
       end
     else
@@ -107,7 +116,8 @@ Puppet::Type.type(:libvirt_network).provide(:virsh) do
   end
 
   def online_update_entry(old_entry, new_entry, section)
-    if %w[ip-dhcp-range dns-host dns-txt dns-srv].include?(section) ||
+    if (section == 'ip-dhcp-host' && old_entry['mac'] != new_entry['mac']) ||
+       %w[ip-dhcp-range dns-host dns-txt dns-srv].include?(section) ||
        (section == 'portgroup' && old_entry['name'] != new_entry['name'])
       online_update_xml(old_entry, 'delete', section)
       online_update_xml(new_entry, 'add', section)
